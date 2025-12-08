@@ -3,5 +3,5 @@ pandas
 requests
 folium
 streamlit-folium
-pinecone-client
+pinecone
 openai

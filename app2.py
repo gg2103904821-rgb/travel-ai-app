@@ -196,6 +196,80 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         
     return filtered_hotels[:4]
 
+from PIL import Image, ImageOps, ImageDraw, ImageFont
+from io import BytesIO
+
+# --- Helper: 纯代码生成邮票样式 (无需外部素材) ---
+def create_digital_stamp(image_file, title_text, location_text):
+    """
+    接收上传的图片文件，返回一张处理好的邮票图片对象
+    """
+    # 1. 读取并基础处理
+    img = Image.open(image_file).convert("RGBA")
+    
+    # 裁剪为 3:4 比例 (例如 600x800)
+    target_w, target_h = 600, 800
+    img = ImageOps.fit(img, (target_w, target_h), centering=(0.5, 0.5))
+    
+    # 2. 创建邮票底板 (白色，比图片大一圈)
+    border_width = 40
+    stamp_w = target_w + border_width * 2
+    stamp_h = target_h + border_width * 2 + 100 # 底部留白写字
+    stamp = Image.new("RGBA", (stamp_w, stamp_h), "white")
+    
+    # 3. 粘贴照片
+    stamp.paste(img, (border_width, border_width))
+    
+    # 4. 绘制锯齿边缘 (模拟打孔)
+    mask = Image.new("L", (stamp_w, stamp_h), 255)
+    draw_mask = ImageDraw.Draw(mask)
+    r = 12 # 锯齿半径
+    
+    # 沿四边画黑色圆圈（在Mask中黑色=透明）
+    # 上下边
+    for x in range(0, stamp_w, r*3):
+        draw_mask.ellipse((x, -r, x+r*2, r), fill=0) # 上
+        draw_mask.ellipse((x, stamp_h-r, x+r*2, stamp_h+r), fill=0) # 下
+    # 左右边
+    for y in range(0, stamp_h, r*3):
+        draw_mask.ellipse((-r, y, r, y+r*2), fill=0) # 左
+        draw_mask.ellipse((stamp_w-r, y, stamp_w+r, y+r*2), fill=0) # 右
+        
+    stamp.putalpha(mask)
+    
+    # 5. 绘制文字 (使用默认字体，生产环境建议上传 .ttf)
+    draw = ImageDraw.Draw(stamp)
+    
+    # 标题 (底部居中)
+    try:
+        # 尝试加载大字体，如果环境没有则用默认
+        font_title = ImageFont.truetype("arial.ttf", 40)
+        font_loc = ImageFont.truetype("arial.ttf", 25)
+    except:
+        font_title = ImageFont.load_default()
+        font_loc = ImageFont.load_default()
+
+    # 绘制标题 (黑色)
+    draw.text((stamp_w/2, stamp_h - 80), title_text, fill="#333333", anchor="mm", font=font_title)
+    
+    # 绘制地点/日期 (灰色)
+    date_str = datetime.now().strftime("%Y.%m.%d")
+    meta_text = f"{location_text.upper()} • {date_str}"
+    draw.text((stamp_w/2, stamp_h - 40), meta_text, fill="#888888", anchor="mm", font=font_loc)
+    
+    # 6. 模拟红色邮戳 (画一个圆圈和字)
+    stamp_mark = Image.new("RGBA", (200, 200), (255, 255, 255, 0))
+    draw_mark = ImageDraw.Draw(stamp_mark)
+    draw_mark.ellipse((10, 10, 190, 190), outline="red", width=5)
+    draw_mark.text((100, 100), "WANDERLUST", fill="red", anchor="mm", font=font_loc)
+    
+    # 旋转邮戳并盖在右上角
+    stamp_mark = stamp_mark.rotate(25, resample=Image.BICUBIC)
+    stamp.paste(stamp_mark, (stamp_w - 220, stamp_h - 220), stamp_mark)
+    
+    return stamp
+
+
 # ============================
 # 4. Agent Logic
 # ============================
@@ -223,6 +297,36 @@ class TravelAgent:
         res = self.client.embeddings.create(input=query, model=EMBEDDING_MODEL)
         results = self.index.query(vector=res.data[0].embedding, top_k=3, include_metadata=True)
         return [m['metadata'] for m in results['matches']]
+    
+    def analyze_image_for_stamp(self, image_bytes):
+        """
+        调用 Azure OpenAI GPT-4o 识别图片内容
+        """
+        # 转为 base64
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        
+        prompt = """
+        You are a poetic travel curator. 
+        1. Analyze this image.
+        2. Create a very short title (max 6 characters, e.g. 'Sunset Peak', 'Victoria Night').
+        3. Write a 1-sentence poetic description (max 30 words).
+        Return JSON: {"title": "...", "description": "..."}
+        """
+        
+        resp = self.client.chat.completions.create(
+            model=CHAT_MODEL, # 确保这里的模型是 GPT-4o 或支持 Vision 的版本
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(resp.choices[0].message.content)
 
     def generate_plan_options(self, city, criteria):
         prompt = f"""
@@ -297,6 +401,52 @@ with st.sidebar:
                 st.markdown(plan['content']) # 显示保存的行程
                 st.caption(f"Hotel: {plan.get('hotel', 'Not selected')}")
                 st.caption(f"Total Budget: ${plan.get('total', 0):,.0f}")
+    # --- Sidebar 新增功能: 圆周旅迹 ---
+    st.divider()
+    st.header("📸 Memory Stamps")
+    
+    uploaded_file = st.file_uploader("Upload a photo to create a souvenir", type=['jpg', 'png', 'jpeg'])
+    
+    if uploaded_file:
+        # 显示预览
+        st.image(uploaded_file, caption="Preview", width=200)
+        
+        # 简单的位置输入 (因为网页端获取GPS比较麻烦，手动输入更稳)
+        user_location = st.text_input("Where was this taken?", "Hong Kong")
+        
+        if st.button("✨ Generate AI Stamp"):
+            with st.spinner("AI is painting your memory..."):
+                # 1. AI 分析
+                bytes_data = uploaded_file.getvalue()
+                ai_meta = st.session_state.agent.analyze_image_for_stamp(bytes_data)
+                
+                # 2. 生成邮票
+                stamp_img = create_digital_stamp(
+                    uploaded_file, 
+                    ai_meta['title'], 
+                    user_location
+                )
+                
+                # 3. 存入 Session 方便展示
+                st.session_state.latest_stamp = stamp_img
+                st.session_state.latest_stamp_desc = ai_meta['description']
+    
+    # 展示生成的邮票
+    if "latest_stamp" in st.session_state:
+        st.markdown("### 🏆 Your New Stamp")
+        st.image(st.session_state.latest_stamp, use_container_width=True)
+        st.caption(f"📝 *{st.session_state.latest_stamp_desc}*")
+        
+        # 下载按钮
+        buf = BytesIO()
+        st.session_state.latest_stamp.save(buf, format="PNG")
+        byte_im = buf.getvalue()
+        st.download_button(
+            label="Download Stamp",
+            data=byte_im,
+            file_name="my_travel_stamp.png",
+            mime="image/png"
+        )
 
 progress = (st.session_state.step / 6) * 100
 st.progress(int(progress))

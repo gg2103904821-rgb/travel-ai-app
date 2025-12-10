@@ -9,11 +9,16 @@ from openai import AzureOpenAI
 from datetime import datetime, timedelta
 import base64
 import random
+from PIL import Image, ImageOps, ImageDraw, ImageFont
+from io import BytesIO
+
+# === [NEW] 引入 Geopy 用于地理编码 ===
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 
 # ============================
 # 1. Configuration & Keys
 # ============================
-# 从 Streamlit Secrets 读取 Key
 try:
     PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
     AZURE_API_KEY = st.secrets["AZURE_API_KEY"]
@@ -22,7 +27,6 @@ except FileNotFoundError:
     st.error("没有找到 API Keys，请在 Streamlit Cloud 后台配置 Secrets！")
     st.stop()
 
-# 其他不需要保密的配置可以保留
 INDEX_NAME = "travel-world-openai"
 AZURE_ENDPOINT = "https://hkust.azure-api.net"
 AZURE_API_VERSION = "2023-05-15"
@@ -52,14 +56,11 @@ else:
 
 st.markdown(f"""
 <style>
-    /* 全局背景 */
     .stApp {{
         background-color: #8EC5FC;
         background-image: linear-gradient(62deg, #8EC5FC 0%, #E0C3FC 100%);
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }}
-
-    /* 卡片通用样式 - 强制白底黑字 */
     .white-card, .city-card, .plan-card, .hotel-card {{
         background-color: rgba(255, 255, 255, 0.95) !important;
         border-radius: 16px;
@@ -68,19 +69,13 @@ st.markdown(f"""
         border: 1px solid rgba(255, 255, 255, 0.5);
         box-shadow: 0 10px 20px rgba(0,0,0,0.1);
     }}
-    
-    /* 暴力修复字体颜色 */
     .white-card *, .city-card *, .plan-card *, .hotel-card * {{
         color: #2c3e50 !important;
     }}
     h1, h2, h3, h4 {{ color: #1a1a1a !important; font-weight: 700 !important; }}
     p, li, small {{ color: #4a5568 !important; }}
-
-    /* 图片样式 */
     .banner-img {{ width: 100%; height: 180px; object-fit: cover; border-radius: 16px; margin-bottom: 20px; }}
     .card-img {{ width: 100%; height: 160px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; }}
-
-    /* 预算黑盒 */
     .budget-box {{
         background: linear-gradient(135deg, #2c3e50 0%, #000000 100%) !important;
         color: white !important;
@@ -90,8 +85,6 @@ st.markdown(f"""
         margin-top: 20px;
     }}
     .budget-box * {{ color: white !important; }}
-    
-    /* 保存的计划样式 */
     .saved-plan-item {{
         background: white; padding: 10px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #6a11cb;
     }}
@@ -105,50 +98,52 @@ def estimate_flight_cost(origin, destination):
         return 350
     return 900 
 
+# === [NEW] Helper: 地址转坐标 ===
+def get_coordinates(location_name):
+    """
+    使用 OpenStreetMap (免费) 将地名转为经纬度
+    """
+    try:
+        geolocator = Nominatim(user_agent="wanderlust_ai_app")
+        geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+        location = geocode(location_name)
+        if location:
+            return location.latitude, location.longitude
+    except:
+        pass
+    # 如果找不到或报错，默认返回一个中心点 (例如香港) 以免程序崩溃
+    return 22.3193, 114.1694
+
 # ============================
-# 3. API Tools (Fixed & Enhanced)
+# 3. API Tools
 # ============================
 
 def fetch_city_details_for_plan(city_name):
-    """
-    真正调用 Travel Advisor API 并提取图片 URL
-    """
     try:
         headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
-        
-        # 1. 获取 Location ID
         url_s = f"https://{HOST_ATTRACTIONS}/locations/search"
         resp = requests.get(url_s, headers=headers, params={"query": city_name, "limit": "1", "currency": "USD"}).json()
         loc_id = resp["data"][0]["result_object"]["location_id"]
         
-        # 2. 获取景点 (Attractions)
         url_a = f"https://{HOST_ATTRACTIONS}/attractions/list"
         resp_a = requests.get(url_a, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
         
-        # 3. 获取餐厅 (Restaurants)
         url_r = f"https://{HOST_ATTRACTIONS}/restaurants/list"
         resp_r = requests.get(url_r, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
         
         items = []
-        
-        # 处理景点
         if "data" in resp_a:
             for item in resp_a["data"]:
                 if "name" in item:
-                    # 提取真实图片
                     img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
-                    if not img: 
-                        img = f"https://loremflickr.com/400/300/{item['name'].split()[0]},landmark"
-                    
+                    if not img: img = f"https://loremflickr.com/400/300/{item['name'].split()[0]},landmark"
                     items.append(f"ATTRACTION: {item['name']} | Rating: {item.get('rating')} | Image: {img}")
 
-        # 处理餐厅
         if "data" in resp_r:
             for item in resp_r["data"]:
                 if "name" in item:
                     img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
-                    if not img: 
-                        img = f"https://loremflickr.com/400/300/food,restaurant"
+                    if not img: img = f"https://loremflickr.com/400/300/food,restaurant"
                     items.append(f"RESTAURANT: {item['name']} | Rating: {item.get('rating')} | Image: {img}")
         
         return "\n".join(items)
@@ -156,9 +151,6 @@ def fetch_city_details_for_plan(city_name):
         return f"Using fallback data. Error: {str(e)}"
 
 def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
-    """
-    智能酒店搜索 + 稳定图片生成
-    """
     all_hotels = []
     prefixes = [f"{city_name} Grand", f"The {city_name} View", f"{city_name} Boutique", "City Center Inn", "Backpacker Hostel", "Luxury Palace", "Comfort Stay", "Urban Hub"]
     
@@ -166,27 +158,15 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         base = 50
         multiplier = random.uniform(1, 10) 
         price = int(base * multiplier)
-        
         tags = ["WiFi"]
         if price > 250: tags += ["Pool", "Spa", "Luxury"]
         if price < 100: tags += ["Budget", "Value"]
-        
         score = round(random.uniform(7.5, 9.8), 1)
-        
-        # 稳定随机图
         rand_id = random.randint(1, 1000)
         img_keyword = "luxury,hotel" if price > 200 else "hostel,room" if price < 80 else "hotel,room"
         img_url = f"https://loremflickr.com/400/300/{img_keyword}?random={rand_id}"
-        
-        all_hotels.append({
-            "name": name,
-            "price": price,
-            "score": score,
-            "tags": tags,
-            "image": img_url
-        })
+        all_hotels.append({"name": name, "price": price, "score": score, "tags": tags, "image": img_url})
     
-    # 筛选逻辑
     filtered_hotels = [h for h in all_hotels if h['price'] <= max_nightly_budget]
     if not filtered_hotels: filtered_hotels = sorted(all_hotels, key=lambda x: x['price'])[:3]
     
@@ -196,34 +176,45 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         
     return filtered_hotels[:4]
 
-from PIL import Image, ImageOps, ImageDraw, ImageFont
-from io import BytesIO
-
-# --- Helper: 纯代码生成邮票样式 (无需外部素材) ---
+# --- Helper: 纯代码生成邮票样式 (复古米色 + 无红戳版) ---
 def create_digital_stamp(image_file, title_text, location_text):
     """
-    接收上传的图片文件，返回一张处理好的邮票图片对象
+    接收上传的图片文件，返回一张处理好的邮票图片对象 (复古风)
     """
     # 1. 读取并基础处理
-    img = Image.open(image_file).convert("RGBA")
-    
+    try:
+        img = Image.open(image_file).convert("RGBA")
+    except:
+        return None # 防止空文件报错
+
     # 裁剪为 3:4 比例 (例如 600x800)
     target_w, target_h = 600, 800
     img = ImageOps.fit(img, (target_w, target_h), centering=(0.5, 0.5))
     
-    # 2. 创建邮票底板 (白色，比图片大一圈)
-    border_width = 40
+    # 2. 创建邮票底板
+    # 改动点：背景色改为米白色 (Antique White / Floral White 风格)
+    paper_color = (250, 249, 245, 255) 
+    border_width = 50 # 边框稍微加宽一点，更有呼吸感
     stamp_w = target_w + border_width * 2
-    stamp_h = target_h + border_width * 2 + 100 # 底部留白写字
-    stamp = Image.new("RGBA", (stamp_w, stamp_h), "white")
+    stamp_h = target_h + border_width * 2 + 120 # 底部留白写字
+    
+    stamp = Image.new("RGBA", (stamp_w, stamp_h), paper_color)
     
     # 3. 粘贴照片
     stamp.paste(img, (border_width, border_width))
     
+    # 改动点：给照片加一圈极细的灰色内描边，增加精致感
+    draw = ImageDraw.Draw(stamp)
+    draw.rectangle(
+        [border_width-1, border_width-1, border_width+target_w, border_width+target_h], 
+        outline="#D1D1D1", 
+        width=1
+    )
+    
     # 4. 绘制锯齿边缘 (模拟打孔)
     mask = Image.new("L", (stamp_w, stamp_h), 255)
     draw_mask = ImageDraw.Draw(mask)
-    r = 12 # 锯齿半径
+    r = 14 # 锯齿半径稍微大一点点
     
     # 沿四边画黑色圆圈（在Mask中黑色=透明）
     # 上下边
@@ -237,38 +228,37 @@ def create_digital_stamp(image_file, title_text, location_text):
         
     stamp.putalpha(mask)
     
-    # 5. 绘制文字 (使用默认字体，生产环境建议上传 .ttf)
-    draw = ImageDraw.Draw(stamp)
-    
-    # 标题 (底部居中)
+    # 5. 绘制文字
+    # 字体加载逻辑
     try:
-        # 尝试加载大字体，如果环境没有则用默认
-        font_title = ImageFont.truetype("arial.ttf", 40)
-        font_loc = ImageFont.truetype("arial.ttf", 25)
+        # 尝试加载大字体
+        font_title = ImageFont.truetype("arial.ttf", 46) # 标题大一点
+        font_loc = ImageFont.truetype("arial.ttf", 24)
     except:
         font_title = ImageFont.load_default()
         font_loc = ImageFont.load_default()
 
-    # 绘制标题 (黑色)
-    draw.text((stamp_w/2, stamp_h - 80), title_text, fill="#333333", anchor="mm", font=font_title)
+    # 文字颜色改为深灰色，比纯黑更柔和
+    text_color = "#2C3E50"
+    meta_color = "#7F8C8D"
+
+    # 绘制标题 (底部居中)
+    # 计算文字位置: 照片底部 + 一半的留白区域
+    text_center_y = border_width + target_h + 50
+    draw.text((stamp_w/2, text_center_y), title_text, fill=text_color, anchor="mm", font=font_title)
     
-    # 绘制地点/日期 (灰色)
+    # 改动点：加一条装饰短横线
+    line_y = text_center_y + 30
+    draw.line([(stamp_w/2 - 30, line_y), (stamp_w/2 + 30, line_y)], fill="#BDC3C7", width=2)
+
+    # 绘制地点/日期 (在横线下方)
     date_str = datetime.now().strftime("%Y.%m.%d")
     meta_text = f"{location_text.upper()} • {date_str}"
-    draw.text((stamp_w/2, stamp_h - 40), meta_text, fill="#888888", anchor="mm", font=font_loc)
+    draw.text((stamp_w/2, line_y + 30), meta_text, fill=meta_color, anchor="mm", font=font_loc)
     
-    # 6. 模拟红色邮戳 (画一个圆圈和字)
-    stamp_mark = Image.new("RGBA", (200, 200), (255, 255, 255, 0))
-    draw_mark = ImageDraw.Draw(stamp_mark)
-    draw_mark.ellipse((10, 10, 190, 190), outline="red", width=5)
-    draw_mark.text((100, 100), "WANDERLUST", fill="red", anchor="mm", font=font_loc)
-    
-    # 旋转邮戳并盖在右上角
-    stamp_mark = stamp_mark.rotate(25, resample=Image.BICUBIC)
-    stamp.paste(stamp_mark, (stamp_w - 220, stamp_h - 220), stamp_mark)
+    # 改动点：已完全删除红色邮戳代码 (stamp_mark 部分)
     
     return stamp
-
 
 # ============================
 # 4. Agent Logic
@@ -278,7 +268,6 @@ class TravelAgent:
         self.client = AzureOpenAI(azure_endpoint=AZURE_ENDPOINT, api_version=AZURE_API_VERSION, api_key=AZURE_API_KEY)
         self.pc = Pinecone(api_key=PINECONE_API_KEY)
         self.index = self.pc.Index(INDEX_NAME)
-        
         self.mbti_map = {
             "INTJ": "quiet architecture logic", "INTP": "unique hidden-gems",
             "ENTJ": "luxury efficient", "ENTP": "adventure novelty",
@@ -299,12 +288,7 @@ class TravelAgent:
         return [m['metadata'] for m in results['matches']]
     
     def analyze_image_for_stamp(self, image_bytes):
-        """
-        调用 Azure OpenAI GPT-4o 识别图片内容
-        """
-        # 转为 base64
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
-        
         prompt = """
         You are a poetic travel curator. 
         1. Analyze this image.
@@ -312,18 +296,12 @@ class TravelAgent:
         3. Write a 1-sentence poetic description (max 30 words).
         Return JSON: {"title": "...", "description": "..."}
         """
-        
         resp = self.client.chat.completions.create(
-            model=CHAT_MODEL, # 确保这里的模型是 GPT-4o 或支持 Vision 的版本
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
+            model=CHAT_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]
+            }],
             response_format={"type": "json_object"}
         )
         return json.loads(resp.choices[0].message.content)
@@ -342,18 +320,14 @@ class TravelAgent:
 
     def generate_detailed_itinerary(self, city, plan_concept, criteria):
         real_data = fetch_city_details_for_plan(city)
-        
         prompt = f"""
         Create a detailed {criteria['days']}-day itinerary for {city}.
         Concept: {plan_concept}
-        
         Data Provided (Includes Image URLs):
         {real_data}
-        
         CRITICAL RULES:
         1. **IMAGES**: You MUST display images for every attraction and restaurant mentioned.
            Use Markdown format: `![Name](ImageURL)`
-           Use the exact URLs provided in the 'Data Provided' section.
         2. **PRICING**: Use specific numbers (e.g. "Ticket: $15").
         3. **HOURS**: Include opening hours.
         4. **FORMAT**: Use clean Markdown.
@@ -365,13 +339,15 @@ class TravelAgent:
 # 5. Main App Flow
 # ============================
 
-# Init State (⚠️ 修复：在这里添加了 selected_hotel 的初始化)
+# Init State
 if "step" not in st.session_state: st.session_state.step = 1
 if "user_profile" not in st.session_state: st.session_state.user_profile = {}
 if "trip_data" not in st.session_state: st.session_state.trip_data = {}
 if "saved_plans" not in st.session_state: st.session_state.saved_plans = [] 
 if "agent" not in st.session_state: st.session_state.agent = TravelAgent()
-if "selected_hotel" not in st.session_state: st.session_state.selected_hotel = None # ✅ 修复了报错源
+if "selected_hotel" not in st.session_state: st.session_state.selected_hotel = None
+# === [NEW] 集邮册初始化 ===
+if "stamp_collection" not in st.session_state: st.session_state.stamp_collection = []
 
 # Header
 st.markdown(banner_img_tag, unsafe_allow_html=True)
@@ -382,7 +358,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar (Saved Plans Here!)
+# Sidebar (Saved Plans & Stamps)
 with st.sidebar:
     st.header("👤 Profile")
     if st.session_state.user_profile:
@@ -391,62 +367,58 @@ with st.sidebar:
     
     st.divider()
     
-    # ⚠️ 保存计划查看区
     st.header("📂 My Saved Plans")
     if not st.session_state.saved_plans:
         st.info("No saved plans yet.")
     else:
         for i, plan in enumerate(st.session_state.saved_plans):
             with st.expander(f"📍 {plan['city']} ({plan['date']})"):
-                st.markdown(plan['content']) # 显示保存的行程
+                st.markdown(plan['content']) 
                 st.caption(f"Hotel: {plan.get('hotel', 'Not selected')}")
                 st.caption(f"Total Budget: ${plan.get('total', 0):,.0f}")
-    # --- Sidebar 新增功能: 圆周旅迹 ---
+                
+    # === [UPDATED] Sidebar Logic: 升级版邮票生成 ===
     st.divider()
     st.header("📸 Memory Stamps")
     
-    uploaded_file = st.file_uploader("Upload a photo to create a souvenir", type=['jpg', 'png', 'jpeg'])
+    uploaded_file = st.file_uploader("Upload photo", type=['jpg', 'png', 'jpeg'], key="stamp_uploader")
     
-    if uploaded_file:
-        # 显示预览
-        st.image(uploaded_file, caption="Preview", width=200)
-        
-        # 简单的位置输入 (因为网页端获取GPS比较麻烦，手动输入更稳)
-        user_location = st.text_input("Where was this taken?", "Hong Kong")
-        
-        if st.button("✨ Generate AI Stamp"):
-            with st.spinner("AI is painting your memory..."):
-                # 1. AI 分析
-                bytes_data = uploaded_file.getvalue()
-                ai_meta = st.session_state.agent.analyze_image_for_stamp(bytes_data)
-                
-                # 2. 生成邮票
-                stamp_img = create_digital_stamp(
-                    uploaded_file, 
-                    ai_meta['title'], 
-                    user_location
-                )
-                
-                # 3. 存入 Session 方便展示
-                st.session_state.latest_stamp = stamp_img
-                st.session_state.latest_stamp_desc = ai_meta['description']
+    user_location = st.text_input("Location", "Hong Kong", key="stamp_loc")
     
-    # 展示生成的邮票
-    if "latest_stamp" in st.session_state:
-        st.markdown("### 🏆 Your New Stamp")
-        st.image(st.session_state.latest_stamp, use_container_width=True)
-        st.caption(f"📝 *{st.session_state.latest_stamp_desc}*")
-        
-        # 下载按钮
-        buf = BytesIO()
-        st.session_state.latest_stamp.save(buf, format="PNG")
-        byte_im = buf.getvalue()
-        st.download_button(
-            label="Download Stamp",
-            data=byte_im,
-            file_name="my_travel_stamp.png",
-            mime="image/png"
-        )
+    if uploaded_file and st.button("✨ Mint Stamp"):
+        with st.spinner("Analyzing & Minting..."):
+            # 1. AI 分析
+            bytes_data = uploaded_file.getvalue()
+            ai_meta = st.session_state.agent.analyze_image_for_stamp(bytes_data)
+            
+            # 2. 生成邮票图片
+            stamp_img = create_digital_stamp(
+                uploaded_file, 
+                ai_meta['title'], 
+                user_location
+            )
+            
+            # 3. 获取经纬度
+            lat, lon = get_coordinates(user_location)
+            
+            # 4. 存入集邮册
+            new_stamp_record = {
+                "image": stamp_img,
+                "title": ai_meta['title'],
+                "desc": ai_meta['description'],
+                "location": user_location,
+                "lat": lat,
+                "lon": lon,
+                "time": datetime.now().strftime("%H:%M")
+            }
+            st.session_state.stamp_collection.append(new_stamp_record)
+            
+            st.success("Stamp added to your Journey Map!")
+
+    # 简单的预览最新一张
+    if st.session_state.stamp_collection:
+        latest = st.session_state.stamp_collection[-1]
+        st.image(latest['image'], caption=f"Latest: {latest['title']}", use_container_width=True)
 
 progress = (st.session_state.step / 6) * 100
 st.progress(int(progress))
@@ -565,9 +537,6 @@ elif st.session_state.step == 5:
     city = st.session_state.selected_city
     data = st.session_state.trip_data
     
-    # === [关键修复 1] 初始化酒店列表缓存 ===
-    # 只有当缓存里没有酒店列表时，才调用 API/随机生成函数
-    # 这样保证每次刷新页面，右边的推荐列表是固定的，不会乱变
     if "current_hotel_list" not in st.session_state or st.session_state.current_hotel_list is None:
         hotel_budget_max = data['daily_budget'] * 0.5 
         st.session_state.current_hotel_list = search_hotels_smart(
@@ -576,14 +545,11 @@ elif st.session_state.step == 5:
 
     col_l, col_r = st.columns([2, 1])
     
-    # === 左侧：行程详情 + 已选酒店显示 ===
     with col_l:
         st.markdown(f"## 🗓️ Itinerary: {st.session_state.selected_plan_name}")
         
-        # 显示已选酒店
         if st.session_state.selected_hotel:
             sh = st.session_state.selected_hotel
-            # 使用 info 框高亮显示
             st.info(f"""
             ✅ **Selected Hotel:** {sh['name']}
             
@@ -592,12 +558,10 @@ elif st.session_state.step == 5:
         else:
             st.warning("🛏️ You haven't selected a hotel yet. Pick one from the right side.")
 
-        # 行程卡片
         st.markdown('<div class="white-card">', unsafe_allow_html=True)
         st.markdown(st.session_state.final_itinerary)
         st.markdown('</div>', unsafe_allow_html=True)
         
-        # 保存按钮
         if st.button("💾 Save Plan to Sidebar"):
             plan_record = {
                 "city": city,
@@ -609,16 +573,13 @@ elif st.session_state.step == 5:
             st.session_state.saved_plans.append(plan_record)
             st.toast("Plan saved! Check the Sidebar.")
             
-            # 强制刷新以更新侧边栏
             import time
             time.sleep(0.5)
             st.rerun()
 
-    # === 右侧：酒店推荐 ===
     with col_r:
         st.markdown("### 🏨 Recommended Hotels")
         
-        # [关键修复 2] 从 session_state 读取固定的列表，而不是重新生成
         hotels = st.session_state.current_hotel_list
         
         if not hotels: st.warning("Budget too low for hotels.")
@@ -636,18 +597,14 @@ elif st.session_state.step == 5:
                 """, unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
                 
-                # 交互逻辑
-                # 确保 is_sel 是布尔值
                 is_sel = (st.session_state.selected_hotel is not None) and (st.session_state.selected_hotel['name'] == h['name'])
                 
-                # 按钮逻辑
                 if st.button("✅ Selected" if is_sel else f"Add (${h['price']})", key=f"btn_{h['name']}", disabled=is_sel):
                     st.session_state.selected_hotel = h
-                    st.rerun() # 立即刷新，触发左侧 info 更新
+                    st.rerun()
         
         st.markdown("---")
         
-        # 预算计算显示区域
         if st.session_state.selected_hotel:
             h_price = st.session_state.selected_hotel['price']
             nights = data['days'] - 1
@@ -669,9 +626,85 @@ elif st.session_state.step == 5:
             </div>
             """, unsafe_allow_html=True)
 
-    # 重置按钮需要顺便清空酒店缓存
-    if st.button("🔄 Start New Trip"):
-        st.session_state.step = 1
-        st.session_state.selected_hotel = None
-        st.session_state.current_hotel_list = None # [关键修复 3] 清空缓存，下次生成新的
-        st.rerun().rerun()
+    # 底部按钮区
+    st.divider()
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🔄 Start New Trip"):
+            st.session_state.step = 1
+            st.session_state.selected_hotel = None
+            st.session_state.current_hotel_list = None
+            st.rerun()
+    # === [NEW] 入口按钮到 Step 6 ===
+    with col_btn2:
+        if st.button("🗺️ View Journey Map (Step 6) ➡️"):
+            st.session_state.step = 6
+            st.rerun()
+
+# --- [NEW] STEP 6: JOURNEY MAP (圆周旅迹) ---
+elif st.session_state.step == 6:
+    st.markdown("## 🌍 My Journey Map & Album")
+    st.markdown("Your digital footprint, immortalized as stamps.")
+    
+    col_map, col_album = st.columns([2, 1])
+    
+    with col_map:
+        st.markdown("### 📍 Interaction Map")
+        
+        if not st.session_state.stamp_collection:
+            st.info("No stamps yet! Upload photos in the Sidebar to start tracking your journey.")
+            m = folium.Map(location=[22.3193, 114.1694], zoom_start=11)
+        else:
+            # 1. 初始化地图，中心点设为第一张邮票的位置
+            start_loc = [st.session_state.stamp_collection[0]['lat'], st.session_state.stamp_collection[0]['lon']]
+            m = folium.Map(location=start_loc, zoom_start=13)
+            
+            # 2. 准备轨迹坐标点列表
+            route_coords = []
+            
+            # 3. 遍历集邮册打点
+            for idx, stamp in enumerate(st.session_state.stamp_collection):
+                coord = [stamp['lat'], stamp['lon']]
+                route_coords.append(coord)
+                
+                popup_html = f"""
+                <b>{stamp['title']}</b><br>
+                {stamp['location']}<br>
+                <i>{stamp['desc']}</i>
+                """
+                
+                folium.Marker(
+                    location=coord,
+                    popup=folium.Popup(popup_html, max_width=200),
+                    tooltip=f"{idx+1}. {stamp['title']}",
+                    icon=folium.Icon(color="purple", icon="camera", prefix="fa")
+                ).add_to(m)
+            
+            # 4. 绘制轨迹线
+            if len(route_coords) > 1:
+                folium.PolyLine(
+                    route_coords,
+                    color="#6a11cb",
+                    weight=4,
+                    opacity=0.8,
+                    dash_array='10'
+                ).add_to(m)
+
+        st_folium(m, width="100%", height=500)
+
+    with col_album:
+        st.markdown("### 📒 Stamp Album")
+        
+        if not st.session_state.stamp_collection:
+            st.write("waiting for memories...")
+        else:
+            for stamp in reversed(st.session_state.stamp_collection):
+                with st.container():
+                    st.markdown(f"**{stamp['title']}** | *{stamp['location']}*")
+                    st.image(stamp['image'], use_container_width=True)
+                    st.caption(f"💭 {stamp['desc']}")
+                    st.divider()
+                    
+    if st.button("⬅️ Back to Itinerary"):
+        st.session_state.step = 5
+        st.rerun()

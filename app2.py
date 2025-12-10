@@ -111,7 +111,6 @@ def get_coordinates(location_name):
             return location.latitude, location.longitude
     except:
         pass
-    # 如果找不到或报错，默认返回一个中心点 (例如香港) 以免程序崩溃
     return 22.3193, 114.1694
 
 # ============================
@@ -181,29 +180,24 @@ def create_digital_stamp(image_file, title_text, location_text):
     """
     接收上传的图片文件，返回一张处理好的邮票图片对象 (复古风)
     """
-    # 1. 读取并基础处理
     try:
         img = Image.open(image_file).convert("RGBA")
     except:
-        return None # 防止空文件报错
+        return None 
 
-    # 裁剪为 3:4 比例 (例如 600x800)
     target_w, target_h = 600, 800
     img = ImageOps.fit(img, (target_w, target_h), centering=(0.5, 0.5))
     
-    # 2. 创建邮票底板
-    # 改动点：背景色改为米白色 (Antique White / Floral White 风格)
+    # 背景色改为米白色
     paper_color = (250, 249, 245, 255) 
-    border_width = 50 # 边框稍微加宽一点，更有呼吸感
+    border_width = 50 
     stamp_w = target_w + border_width * 2
-    stamp_h = target_h + border_width * 2 + 120 # 底部留白写字
+    stamp_h = target_h + border_width * 2 + 120 
     
     stamp = Image.new("RGBA", (stamp_w, stamp_h), paper_color)
-    
-    # 3. 粘贴照片
     stamp.paste(img, (border_width, border_width))
     
-    # 改动点：给照片加一圈极细的灰色内描边，增加精致感
+    # 极细灰色内描边
     draw = ImageDraw.Draw(stamp)
     draw.rectangle(
         [border_width-1, border_width-1, border_width+target_w, border_width+target_h], 
@@ -211,52 +205,36 @@ def create_digital_stamp(image_file, title_text, location_text):
         width=1
     )
     
-    # 4. 绘制锯齿边缘 (模拟打孔)
     mask = Image.new("L", (stamp_w, stamp_h), 255)
     draw_mask = ImageDraw.Draw(mask)
-    r = 14 # 锯齿半径稍微大一点点
-    
-    # 沿四边画黑色圆圈（在Mask中黑色=透明）
-    # 上下边
+    r = 14
     for x in range(0, stamp_w, r*3):
-        draw_mask.ellipse((x, -r, x+r*2, r), fill=0) # 上
-        draw_mask.ellipse((x, stamp_h-r, x+r*2, stamp_h+r), fill=0) # 下
-    # 左右边
+        draw_mask.ellipse((x, -r, x+r*2, r), fill=0) 
+        draw_mask.ellipse((x, stamp_h-r, x+r*2, stamp_h+r), fill=0) 
     for y in range(0, stamp_h, r*3):
-        draw_mask.ellipse((-r, y, r, y+r*2), fill=0) # 左
-        draw_mask.ellipse((stamp_w-r, y, stamp_w+r, y+r*2), fill=0) # 右
+        draw_mask.ellipse((-r, y, r, y+r*2), fill=0) 
+        draw_mask.ellipse((stamp_w-r, y, stamp_w+r, y+r*2), fill=0) 
         
     stamp.putalpha(mask)
     
-    # 5. 绘制文字
-    # 字体加载逻辑
     try:
-        # 尝试加载大字体
-        font_title = ImageFont.truetype("arial.ttf", 46) # 标题大一点
+        font_title = ImageFont.truetype("arial.ttf", 46)
         font_loc = ImageFont.truetype("arial.ttf", 24)
     except:
         font_title = ImageFont.load_default()
         font_loc = ImageFont.load_default()
 
-    # 文字颜色改为深灰色，比纯黑更柔和
     text_color = "#2C3E50"
     meta_color = "#7F8C8D"
-
-    # 绘制标题 (底部居中)
-    # 计算文字位置: 照片底部 + 一半的留白区域
     text_center_y = border_width + target_h + 50
     draw.text((stamp_w/2, text_center_y), title_text, fill=text_color, anchor="mm", font=font_title)
     
-    # 改动点：加一条装饰短横线
     line_y = text_center_y + 30
     draw.line([(stamp_w/2 - 30, line_y), (stamp_w/2 + 30, line_y)], fill="#BDC3C7", width=2)
 
-    # 绘制地点/日期 (在横线下方)
     date_str = datetime.now().strftime("%Y.%m.%d")
     meta_text = f"{location_text.upper()} • {date_str}"
     draw.text((stamp_w/2, line_y + 30), meta_text, fill=meta_color, anchor="mm", font=font_loc)
-    
-    # 改动点：已完全删除红色邮戳代码 (stamp_mark 部分)
     
     return stamp
 
@@ -346,7 +324,6 @@ if "trip_data" not in st.session_state: st.session_state.trip_data = {}
 if "saved_plans" not in st.session_state: st.session_state.saved_plans = [] 
 if "agent" not in st.session_state: st.session_state.agent = TravelAgent()
 if "selected_hotel" not in st.session_state: st.session_state.selected_hotel = None
-# === [NEW] 集邮册初始化 ===
 if "stamp_collection" not in st.session_state: st.session_state.stamp_collection = []
 
 # Header
@@ -377,7 +354,7 @@ with st.sidebar:
                 st.caption(f"Hotel: {plan.get('hotel', 'Not selected')}")
                 st.caption(f"Total Budget: ${plan.get('total', 0):,.0f}")
                 
-    # === [UPDATED] Sidebar Logic: 升级版邮票生成 ===
+    # === Sidebar Logic: Stamp Generation ===
     st.divider()
     st.header("📸 Memory Stamps")
     
@@ -415,10 +392,22 @@ with st.sidebar:
             
             st.success("Stamp added to your Journey Map!")
 
-    # 简单的预览最新一张
+    # 预览最新一张 + [FIXED] 下载按钮
     if st.session_state.stamp_collection:
         latest = st.session_state.stamp_collection[-1]
         st.image(latest['image'], caption=f"Latest: {latest['title']}", use_container_width=True)
+        
+        # 将PIL Image转换为Bytes
+        buf = BytesIO()
+        latest['image'].save(buf, format="PNG")
+        byte_im = buf.getvalue()
+        
+        st.download_button(
+            label="📥 Download Stamp",
+            data=byte_im,
+            file_name=f"stamp_{latest['title']}.png",
+            mime="image/png"
+        )
 
 progress = (st.session_state.step / 6) * 100
 st.progress(int(progress))
@@ -635,13 +624,12 @@ elif st.session_state.step == 5:
             st.session_state.selected_hotel = None
             st.session_state.current_hotel_list = None
             st.rerun()
-    # === [NEW] 入口按钮到 Step 6 ===
     with col_btn2:
         if st.button("🗺️ View Journey Map (Step 6) ➡️"):
             st.session_state.step = 6
             st.rerun()
 
-# --- [NEW] STEP 6: JOURNEY MAP (圆周旅迹) ---
+# --- STEP 6: JOURNEY MAP (圆周旅迹) ---
 elif st.session_state.step == 6:
     st.markdown("## 🌍 My Journey Map & Album")
     st.markdown("Your digital footprint, immortalized as stamps.")

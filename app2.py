@@ -12,7 +12,7 @@ import random
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from io import BytesIO
 
-# === [NEW] 引入 Geopy 用于地理编码 ===
+# === 引入 Geopy 用于地理编码 ===
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
@@ -74,8 +74,10 @@ st.markdown(f"""
     }}
     h1, h2, h3, h4 {{ color: #1a1a1a !important; font-weight: 700 !important; }}
     p, li, small {{ color: #4a5568 !important; }}
+    
     .banner-img {{ width: 100%; height: 180px; object-fit: cover; border-radius: 16px; margin-bottom: 20px; }}
     .card-img {{ width: 100%; height: 160px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; }}
+    
     .budget-box {{
         background: linear-gradient(135deg, #2c3e50 0%, #000000 100%) !important;
         color: white !important;
@@ -85,8 +87,28 @@ st.markdown(f"""
         margin-top: 20px;
     }}
     .budget-box * {{ color: white !important; }}
+    
     .saved-plan-item {{
         background: white; padding: 10px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #6a11cb;
+    }}
+    
+    /* --- 新增样式: 链接与画廊 --- */
+    a {{
+        text-decoration: none;
+        color: #6a11cb !important;
+        font-weight: bold;
+    }}
+    a:hover {{
+        text-decoration: underline;
+    }}
+    
+    .hotel-card {{
+        padding: 15px;
+        border: 1px solid #eee;
+        transition: box-shadow 0.3s;
+    }}
+    .hotel-card:hover {{
+        box-shadow: 0 8px 16px rgba(0,0,0,0.1);
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -98,7 +120,7 @@ def estimate_flight_cost(origin, destination):
         return 350
     return 900 
 
-# === [NEW] Helper: 地址转坐标 ===
+# --- Helper: 地址转坐标 ---
 def get_coordinates(location_name):
     """
     使用 OpenStreetMap (免费) 将地名转为经纬度
@@ -114,16 +136,23 @@ def get_coordinates(location_name):
     return 22.3193, 114.1694
 
 # ============================
-# 3. API Tools
+# 3. API Tools (Fixed & Enhanced)
 # ============================
 
 def fetch_city_details_for_plan(city_name):
+    """
+    获取 Travel Advisor 数据，提取地址，并生成5张图片用于画廊
+    """
     try:
         headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
+        
+        # 1. 获取 Location ID
         url_s = f"https://{HOST_ATTRACTIONS}/locations/search"
         resp = requests.get(url_s, headers=headers, params={"query": city_name, "limit": "1", "currency": "USD"}).json()
+        if "data" not in resp or not resp["data"]: return f"No data found for {city_name}"
         loc_id = resp["data"][0]["result_object"]["location_id"]
         
+        # 2. 获取景点 & 餐厅
         url_a = f"https://{HOST_ATTRACTIONS}/attractions/list"
         resp_a = requests.get(url_a, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
         
@@ -131,25 +160,51 @@ def fetch_city_details_for_plan(city_name):
         resp_r = requests.get(url_r, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
         
         items = []
-        if "data" in resp_a:
-            for item in resp_a["data"]:
-                if "name" in item:
-                    img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
-                    if not img: img = f"https://loremflickr.com/400/300/{item['name'].split()[0]},landmark"
-                    items.append(f"ATTRACTION: {item['name']} | Rating: {item.get('rating')} | Image: {img}")
-
-        if "data" in resp_r:
-            for item in resp_r["data"]:
-                if "name" in item:
-                    img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
-                    if not img: img = f"https://loremflickr.com/400/300/food,restaurant"
-                    items.append(f"RESTAURANT: {item['name']} | Rating: {item.get('rating')} | Image: {img}")
         
-        return "\n".join(items)
+        def process_items(data_list, type_label):
+            if "data" in data_list:
+                for item in data_list["data"]:
+                    if "name" in item:
+                        # 获取地址
+                        address = item.get('address', 'Address not available')
+                        
+                        # 获取主图
+                        main_img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
+                        
+                        # 生成5张图 (1张真实 + 4张随机补全，或者全部随机)
+                        images = []
+                        if main_img: images.append(main_img)
+                        
+                        base_keyword = item['name'].split()[0] if item['name'] else "travel"
+                        for i in range(5 - len(images)):
+                            rand_sig = random.randint(1000, 9999)
+                            images.append(f"https://loremflickr.com/400/300/{base_keyword},{type_label.lower()}?random={rand_sig}")
+                        
+                        # Google Maps Link
+                        map_query = f"{item['name']} {city_name}".replace(" ", "+")
+                        map_link = f"https://www.google.com/maps/search/?api=1&query={map_query}"
+                        
+                        # 构建数据块传给 LLM
+                        items.append(f"""
+                        TYPE: {type_label}
+                        NAME: {item['name']}
+                        ADDRESS: {address}
+                        MAP_LINK: {map_link}
+                        RATING: {item.get('rating', 'N/A')}
+                        IMAGES: {json.dumps(images)} 
+                        """)
+
+        process_items(resp_a, "ATTRACTION")
+        process_items(resp_r, "RESTAURANT")
+        
+        return "\n---\n".join(items)
     except Exception as e:
         return f"Using fallback data. Error: {str(e)}"
 
 def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
+    """
+    智能酒店搜索 + 5张图片 + Booking链接
+    """
     all_hotels = []
     prefixes = [f"{city_name} Grand", f"The {city_name} View", f"{city_name} Boutique", "City Center Inn", "Backpacker Hostel", "Luxury Palace", "Comfort Stay", "Urban Hub"]
     
@@ -161,10 +216,26 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         if price > 250: tags += ["Pool", "Spa", "Luxury"]
         if price < 100: tags += ["Budget", "Value"]
         score = round(random.uniform(7.5, 9.8), 1)
-        rand_id = random.randint(1, 1000)
-        img_keyword = "luxury,hotel" if price > 200 else "hostel,room" if price < 80 else "hotel,room"
-        img_url = f"https://loremflickr.com/400/300/{img_keyword}?random={rand_id}"
-        all_hotels.append({"name": name, "price": price, "score": score, "tags": tags, "image": img_url})
+        
+        # === 生成 5 张图片 ===
+        img_list = []
+        for i in range(5):
+            rand_id = random.randint(1, 10000)
+            img_keyword = "luxury,hotel" if price > 200 else "hostel,room" if price < 80 else "hotel,room"
+            img_list.append(f"https://loremflickr.com/400/300/{img_keyword}?random={rand_id}")
+        
+        # === 生成 Booking.com 链接 ===
+        booking_query = f"{name} {city_name}".replace(" ", "+")
+        booking_url = f"https://www.booking.com/searchresults.html?ss={booking_query}"
+
+        all_hotels.append({
+            "name": name, 
+            "price": price, 
+            "score": score, 
+            "tags": tags, 
+            "images": img_list,
+            "booking_url": booking_url
+        })
     
     filtered_hotels = [h for h in all_hotels if h['price'] <= max_nightly_budget]
     if not filtered_hotels: filtered_hotels = sorted(all_hotels, key=lambda x: x['price'])[:3]
@@ -175,7 +246,7 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         
     return filtered_hotels[:4]
 
-# --- Helper: 纯代码生成邮票样式 (复古米色 + 无红戳版) ---
+# --- Helper: 纯代码生成邮票样式 (复古风) ---
 def create_digital_stamp(image_file, title_text, location_text):
     """
     接收上传的图片文件，返回一张处理好的邮票图片对象 (复古风)
@@ -298,18 +369,33 @@ class TravelAgent:
 
     def generate_detailed_itinerary(self, city, plan_concept, criteria):
         real_data = fetch_city_details_for_plan(city)
+        
         prompt = f"""
         Create a detailed {criteria['days']}-day itinerary for {city}.
         Concept: {plan_concept}
-        Data Provided (Includes Image URLs):
+        
+        Raw Data Provided (Contains Names, Addresses, Map Links, and Image Lists):
         {real_data}
-        CRITICAL RULES:
-        1. **IMAGES**: You MUST display images for every attraction and restaurant mentioned.
-           Use Markdown format: `![Name](ImageURL)`
-        2. **PRICING**: Use specific numbers (e.g. "Ticket: $15").
-        3. **HOURS**: Include opening hours.
-        4. **FORMAT**: Use clean Markdown.
+        
+        CRITICAL FORMATTING RULES:
+        1. **LOCATIONS**: For every attraction/restaurant, display the Name and Address as a link.
+           Format: `📍 [Name](Map_Link) - Address` 
+           (Use the exact MAP_LINK provided in the data).
+           
+        2. **IMAGES (Gallery)**: For key locations, display 5 images in a row. 
+           Since Markdown tables can be tricky, use HTML image tags with width to create a strip.
+           Format:
+           `<div style="display: flex; overflow-x: auto; gap: 5px;">
+              <img src="URL1" style="height: 120px; border-radius: 5px;">
+              <img src="URL2" style="height: 120px; border-radius: 5px;">
+              ...
+            </div>`
+           (Use the URLs from the 'IMAGES' list in the data).
+           
+        3. **PRICING & HOURS**: Include specific numbers.
+        4. **Tone**: Engaging and clear.
         """
+        
         resp = self.client.chat.completions.create(model=CHAT_MODEL, messages=[{"role": "user", "content": prompt}])
         return resp.choices[0].message.content
 
@@ -350,7 +436,7 @@ with st.sidebar:
     else:
         for i, plan in enumerate(st.session_state.saved_plans):
             with st.expander(f"📍 {plan['city']} ({plan['date']})"):
-                st.markdown(plan['content']) 
+                st.markdown(plan['content'], unsafe_allow_html=True) 
                 st.caption(f"Hotel: {plan.get('hotel', 'Not selected')}")
                 st.caption(f"Total Budget: ${plan.get('total', 0):,.0f}")
                 
@@ -392,12 +478,11 @@ with st.sidebar:
             
             st.success("Stamp added to your Journey Map!")
 
-    # 预览最新一张 + [FIXED] 下载按钮
+    # 预览最新一张 + 下载按钮
     if st.session_state.stamp_collection:
         latest = st.session_state.stamp_collection[-1]
         st.image(latest['image'], caption=f"Latest: {latest['title']}", use_container_width=True)
         
-        # 将PIL Image转换为Bytes
         buf = BytesIO()
         latest['image'].save(buf, format="PNG")
         byte_im = buf.getvalue()
@@ -548,7 +633,7 @@ elif st.session_state.step == 5:
             st.warning("🛏️ You haven't selected a hotel yet. Pick one from the right side.")
 
         st.markdown('<div class="white-card">', unsafe_allow_html=True)
-        st.markdown(st.session_state.final_itinerary)
+        st.markdown(st.session_state.final_itinerary, unsafe_allow_html=True) # HTML Allowed here
         st.markdown('</div>', unsafe_allow_html=True)
         
         if st.button("💾 Save Plan to Sidebar"):
@@ -576,14 +661,25 @@ elif st.session_state.step == 5:
         for h in hotels:
             with st.container():
                 st.markdown('<div class="hotel-card">', unsafe_allow_html=True)
-                st.image(h['image'], use_container_width=True)
+                
+                # 1. 酒店标题 + Booking 跳转链接
+                st.markdown(f"#### 🏨 [{h['name']}]({h['booking_url']})")
+                st.caption("Click name to book on Booking.com ↗")
+                
+                # 2. 图片浏览 (使用 Tabs 模拟滑动效果)
+                tabs = st.tabs(["📸 1", "📸 2", "📸 3", "📸 4", "📸 5"])
+                for i, tab in enumerate(tabs):
+                    with tab:
+                        st.image(h['images'][i], use_container_width=True)
+                
+                # 3. 信息展示
                 st.markdown(f"""
-                <div class="hotel-info">
-                    <h4>{h['name']}</h4>
-                    <p>⭐ {h['score']} • <b>${h['price']}</b>/night</p>
+                <div class="hotel-info" style="margin-top: 10px;">
+                    <p>⭐ <b>{h['score']}</b> • <b style="color:#e67e22; font-size:1.1em;">${h['price']}</b>/night</p>
                     <small>{', '.join(h['tags'])}</small>
                 </div>
                 """, unsafe_allow_html=True)
+                
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 is_sel = (st.session_state.selected_hotel is not None) and (st.session_state.selected_hotel['name'] == h['name'])

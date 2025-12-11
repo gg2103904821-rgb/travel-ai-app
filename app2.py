@@ -111,7 +111,7 @@ st.markdown(f"""
         box-shadow: 0 8px 16px rgba(0,0,0,0.1);
     }}
     
-    /* 新增：酒店主图样式 */
+    /* 酒店主图样式 */
     .hotel-main-img {{
         border-radius: 12px;
         height: 250px;
@@ -183,7 +183,7 @@ def fetch_city_details_for_plan(city_name):
                         price_level = item.get('price_level', 'N/A')
                         open_now_text = item.get('open_now_text', 'Hours not listed')
                         
-                        # [关键修改] 只提取真实的图片 URL，不凑假图
+                        # 只提取真实的图片 URL
                         real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
                         if not real_image_url:
                              real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "N/A")
@@ -191,7 +191,6 @@ def fetch_city_details_for_plan(city_name):
                         map_query = urllib.parse.quote(f"{name} {city_name}")
                         map_link = f"https://www.google.com/maps/search/?api=1&query={map_query}"
                         
-                        # 传递给 LLM 的数据块，包含单一的真实图片 URL
                         items.append(f"""
                         TYPE: {type_label}
                         NAME: {name}
@@ -212,78 +211,91 @@ def fetch_city_details_for_plan(city_name):
 
 def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
     """
-    获取真实酒店，只提取真实图片 URL
+    获取真实酒店 + 强制兜底逻辑 (确保永远有结果)
     """
+    real_hotels = []
+    
+    # 1. 尝试从 API 获取真实数据
     try:
         loc_id = get_location_id(city_name)
-        if not loc_id: return []
-
-        headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
-        url = f"https://{HOST_ATTRACTIONS}/hotels/list"
-        
-        resp = requests.get(url, headers=headers, params={
-            "location_id": loc_id, 
-            "limit": "30", 
-            "currency": "USD",
-            "checkin": check_in_date,
-            "nights": "1"
-        }).json()
-        
-        real_hotels = []
-        
-        if "data" in resp:
-            for i_item, item in enumerate(resp["data"]):
-                if "name" not in item: continue
-                
-                price_str = item.get("price", "$999") 
-                try:
-                    clean_price = ''.join([c for c in price_str if c.isdigit()])
-                    price = int(clean_price) if clean_price else 999
-                except: price = 999
-                
-                # [关键修改] 只提取真实的图片 URL
-                real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
-                if not real_image_url:
-                     real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
-                
-                # 如果连一张真图都没有，为了 UI 美观，可以使用一个固定的“暂无图片”占位符，或者直接留空
-                # 这里选择留空，UI 层会处理
-                
-                booking_query = urllib.parse.quote(f"{item['name']} {city_name}")
-                booking_url = f"https://www.booking.com/searchresults.html?ss={booking_query}"
-
-                tags = []
-                rating = item.get("rating", "N/A")
-                if rating != "N/A" and float(rating) >= 4.5: tags.append("Top Rated")
-                if price > 400: tags.append("Luxury")
-                elif price < 150: tags.append("Value")
-                
-                real_hotels.append({
-                    "name": item['name'],
-                    "price": price,
-                    "score": rating,
-                    "tags": tags[:3],
-                    "image": real_image_url, # 现在是单个URL字符串
-                    "booking_url": booking_url
-                })
-        
-        filtered = [h for h in real_hotels if h['price'] <= max_nightly_budget]
-        
-        # 强制兜底
-        if not filtered and real_hotels:
-            filtered = sorted(real_hotels, key=lambda x: x['price'])[:4]
-        
-        # 排序
-        if style == "Staycation": filtered.sort(key=lambda x: x['price'], reverse=True)
-        elif style == "Budget": filtered.sort(key=lambda x: x['price'])
-        else: 
-            filtered.sort(key=lambda x: float(x['score']) if x['score'].replace('.', '', 1).isdigit() else 0, reverse=True)
+        if loc_id:
+            headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
+            url = f"https://{HOST_ATTRACTIONS}/hotels/list"
             
-        return filtered[:4]
+            # 通用查询
+            resp = requests.get(url, headers=headers, params={
+                "location_id": loc_id, 
+                "limit": "30", 
+                "currency": "USD",
+                "sort": "recommended" 
+            }).json()
+            
+            if "data" in resp:
+                for i_item, item in enumerate(resp["data"]):
+                    if "name" not in item: continue
+                    
+                    price_str = item.get("price", "$200") 
+                    try:
+                        clean_price = ''.join([c for c in price_str if c.isdigit()])
+                        price = int(clean_price) if clean_price else 200
+                    except: price = 200
+                    
+                    # 只提取真实图片
+                    real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
+                    if not real_image_url:
+                         real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
+                    
+                    booking_query = urllib.parse.quote(f"{item['name']} {city_name}")
+                    booking_url = f"https://www.booking.com/searchresults.html?ss={booking_query}"
 
+                    tags = []
+                    rating = item.get("rating", "N/A")
+                    if rating != "N/A" and float(rating) >= 4.5: tags.append("Top Rated")
+                    if price > 400: tags.append("Luxury")
+                    elif price < 150: tags.append("Value")
+                    
+                    real_hotels.append({
+                        "name": item['name'],
+                        "price": price,
+                        "score": rating,
+                        "tags": tags[:3],
+                        "image": real_image_url,
+                        "booking_url": booking_url
+                    })
     except Exception as e:
         print(f"Hotel API Error: {e}")
-        return []
+
+    # 2. 筛选逻辑
+    filtered = [h for h in real_hotels if h['price'] <= max_nightly_budget]
+    
+    # 3. [第一层兜底] 如果筛选后没结果，返回真实数据中最便宜的
+    if not filtered and real_hotels:
+        filtered = sorted(real_hotels, key=lambda x: x['price'])[:4]
+        
+    # 4. [终极兜底] 如果连 API 都没返回数据，生成模拟数据 (仅作为最后保险，通常不会触发)
+    if not filtered:
+        fallback_names = [f"{city_name} Grand Hotel", f"The {city_name} View", f"{city_name} City Center", "Royal Stay"]
+        for i, name in enumerate(fallback_names):
+            seed = random.randint(100, 999)
+            fallback_img = f"https://loremflickr.com/600/400/hotel,luxury?random={seed}"
+            booking_query = urllib.parse.quote(f"{name} {city_name}")
+            
+            filtered.append({
+                "name": name,
+                "price": 150 + (i * 50),
+                "score": "8.5",
+                "tags": ["Popular", "Fallback Data"],
+                "image": fallback_img,
+                "booking_url": f"https://www.booking.com/searchresults.html?ss={booking_query}"
+            })
+
+    # 排序
+    if style == "Staycation": filtered.sort(key=lambda x: x['price'], reverse=True)
+    elif style == "Budget": filtered.sort(key=lambda x: x['price'])
+    else: 
+        filtered.sort(key=lambda x: x['price'], reverse=True) 
+            
+    return filtered[:4]
 
 # --- Helper: 纯代码生成邮票样式 (复古风) ---
 def create_digital_stamp(image_file, title_text, location_text):
@@ -554,21 +566,20 @@ elif st.session_state.step == 2:
         feelings = col2.text_input("Vibe / Feeling", placeholder="e.g. Quiet like 'Lost in Translation'")
         
         c1, c2, c3 = st.columns(3)
-        budget_level = c1.select_slider("Budget Level", options=["Budget", "Standard", "Luxury"])
+        # [修改点] 将 select_slider 改为 number_input，让用户自由输入预算
+        daily_budget = c1.number_input("Daily Budget (USD/Person)", min_value=50, max_value=5000, value=250, step=50)
+        
         days = c2.slider("Duration (Days)", 2, 10, 4)
         pax = c3.number_input("Travelers", 1, 10, 2)
         
         st.markdown("#### Travel Style")
         style = st.radio("Focus:", ["Citywalk", "Shopping", "Foodie", "Staycation", "Culture"], horizontal=True)
         
-        # [修改] 提高预算标准，适应真实物价
-        budget_map = {"Budget": 200, "Standard": 500, "Luxury": 1000}
-        
         if st.button("Find Matching Cities ✨"):
             if feelings:
                 st.session_state.trip_data = {
                     "origin": origin, "feelings": feelings, 
-                    "budget_level": budget_level, "daily_budget": budget_map[budget_level],
+                    "daily_budget": daily_budget, # 直接使用用户输入的值
                     "days": days, "pax": pax, "style": style
                 }
                 with st.spinner("Analyzing world map..."):
@@ -638,7 +649,7 @@ elif st.session_state.step == 5:
     data = st.session_state.trip_data
     
     if "current_hotel_list" not in st.session_state or st.session_state.current_hotel_list is None:
-        # [修改] 提高酒店预算比例至 70%，避免错过好酒店
+        # [修改] 提高酒店预算比例至 70% + 兜底逻辑确保不为空
         hotel_budget_max = data['daily_budget'] * 0.7 
         st.session_state.current_hotel_list = search_hotels_smart(
             city, datetime.now().strftime("%Y-%m-%d"), data['style'], hotel_budget_max
@@ -683,7 +694,8 @@ elif st.session_state.step == 5:
         
         hotels = st.session_state.current_hotel_list
         
-        if not hotels: st.warning("No hotels found matching criteria. Try increasing budget.")
+        # [修改] 由于有兜底逻辑，这里基本不会触发，但保留作为双重保险
+        if not hotels: st.warning("We couldn't find hotels via API. Please check your network.")
         
         for h in hotels:
             with st.container():

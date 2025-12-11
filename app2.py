@@ -705,15 +705,18 @@ elif st.session_state.step == 5:
                 st.markdown(f"#### 🏨 [{h['name']}]({h['booking_url']})")
                 st.caption("Click name to book on Booking.com ↗")
                 
-                # 2. 图片浏览 (修改为只显示一张大图)
+                # 2. 图片浏览 (修复了之前的报错)
                 if h['image']:
-                    st.image(h['image'], use_container_width=True, className="hotel-main-img")
+                    # 使用 HTML 渲染图片，以保证 object-fit: cover (裁切不变形) 和圆角
+                    st.markdown(f"""
+                    <img src="{h['image']}" style="width:100%; height:200px; object-fit:cover; border-radius:12px; margin-bottom:10px;">
+                    """, unsafe_allow_html=True)
                 else:
                     st.caption("No image available")
                 
                 # 3. 信息展示
                 st.markdown(f"""
-                <div class="hotel-info" style="margin-top: 10px;">
+                <div class="hotel-info">
                     <p>⭐ <b>{h['score']}</b> • <b style="color:#e67e22; font-size:1.1em;">${h['price']}</b>/night</p>
                     <small>{', '.join(h['tags'])}</small>
                 </div>
@@ -763,7 +766,7 @@ elif st.session_state.step == 5:
         if st.button("🗺️ View Journey Map (Step 6) ➡️"):
             st.session_state.step = 6
             st.rerun()
-
+            
 # --- STEP 6: JOURNEY MAP (圆周旅迹) ---
 elif st.session_state.step == 6:
     st.markdown("## 🌍 My Journey Map & Album")

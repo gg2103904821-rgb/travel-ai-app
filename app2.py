@@ -11,6 +11,7 @@ import base64
 import random
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from io import BytesIO
+import urllib.parse # 用于处理URL编码
 
 # === 引入 Geopy 用于地理编码 ===
 from geopy.geocoders import Nominatim
@@ -33,7 +34,8 @@ AZURE_API_VERSION = "2023-05-15"
 EMBEDDING_MODEL = "text-embedding-ada-002"
 CHAT_MODEL = "gpt-4o"
 HOST_ATTRACTIONS = "travel-advisor.p.rapidapi.com"
-HOST_HOTELS = "booking-com15.p.rapidapi.com"
+# 酒店数据也统一使用 Travel Advisor API 获取，保证真实性
+HOST_HOTELS = "travel-advisor.p.rapidapi.com" 
 HOST_WEATHER = "weather-api99.p.rapidapi.com"
 
 # ============================
@@ -92,7 +94,6 @@ st.markdown(f"""
         background: white; padding: 10px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #6a11cb;
     }}
     
-    /* --- 新增样式: 链接与画廊 --- */
     a {{
         text-decoration: none;
         color: #6a11cb !important;
@@ -122,9 +123,6 @@ def estimate_flight_cost(origin, destination):
 
 # --- Helper: 地址转坐标 ---
 def get_coordinates(location_name):
-    """
-    使用 OpenStreetMap (免费) 将地名转为经纬度
-    """
     try:
         geolocator = Nominatim(user_agent="wanderlust_ai_app")
         geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
@@ -139,20 +137,29 @@ def get_coordinates(location_name):
 # 3. API Tools (Fixed & Enhanced)
 # ============================
 
-def fetch_city_details_for_plan(city_name):
-    """
-    获取 Travel Advisor 数据，提取地址，并生成5张图片用于画廊
-    """
+def get_location_id(city_name):
+    """单独提取获取 Location ID 的逻辑，供多处复用"""
     try:
         headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
+        url = f"https://{HOST_ATTRACTIONS}/locations/search"
+        resp = requests.get(url, headers=headers, params={"query": city_name, "limit": "1", "currency": "USD"}).json()
+        if "data" in resp and resp["data"]:
+            return resp["data"][0]["result_object"]["location_id"]
+    except:
+        pass
+    return None
+
+def fetch_city_details_for_plan(city_name):
+    """
+    获取真实的景点和餐厅数据，并尽量获取真实大图
+    """
+    try:
+        loc_id = get_location_id(city_name)
+        if not loc_id: return f"Could not find location ID for {city_name}"
         
-        # 1. 获取 Location ID
-        url_s = f"https://{HOST_ATTRACTIONS}/locations/search"
-        resp = requests.get(url_s, headers=headers, params={"query": city_name, "limit": "1", "currency": "USD"}).json()
-        if "data" not in resp or not resp["data"]: return f"No data found for {city_name}"
-        loc_id = resp["data"][0]["result_object"]["location_id"]
+        headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
         
-        # 2. 获取景点 & 餐厅
+        # 获取景点 & 餐厅
         url_a = f"https://{HOST_ATTRACTIONS}/attractions/list"
         resp_a = requests.get(url_a, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
         
@@ -165,26 +172,31 @@ def fetch_city_details_for_plan(city_name):
             if "data" in data_list:
                 for item in data_list["data"]:
                     if "name" in item:
-                        # 获取地址
                         address = item.get('address', 'Address not available')
                         
-                        # 获取主图
-                        main_img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
+                        # [优化] 尝试获取真实的高清大图
+                        main_img = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
+                        if not main_img:
+                             # 如果没有 original，尝试 large
+                             main_img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
                         
-                        # 生成5张图 (1张真实 + 4张随机补全，或者全部随机)
+                        # 构建图片列表：第1张必定是真图（如果有），剩下4张用LoremFlickr补充氛围图
                         images = []
                         if main_img: images.append(main_img)
                         
-                        base_keyword = item['name'].split()[0] if item['name'] else "travel"
-                        for i in range(5 - len(images)):
-                            rand_sig = random.randint(1000, 9999)
-                            images.append(f"https://loremflickr.com/400/300/{base_keyword},{type_label.lower()}?random={rand_sig}")
+                        # 补充图片 (为了避免重复，使用 name hash 作为种子)
+                        safe_name = item['name'].replace(" ", "")
+                        base_keyword = "landmark" if type_label == "ATTRACTION" else "food"
                         
-                        # Google Maps Link
-                        map_query = f"{item['name']} {city_name}".replace(" ", "+")
+                        for i in range(5 - len(images)):
+                            # 使用 item name 的 hash 加上 index 作为随机种子，保证每次生成都一样，但不同项目不一样
+                            seed = hash(safe_name) + i
+                            images.append(f"https://loremflickr.com/400/300/{base_keyword}?random={seed}")
+                        
+                        # 构建 Google Maps Link
+                        map_query = urllib.parse.quote(f"{item['name']} {city_name}")
                         map_link = f"https://www.google.com/maps/search/?api=1&query={map_query}"
                         
-                        # 构建数据块传给 LLM
                         items.append(f"""
                         TYPE: {type_label}
                         NAME: {item['name']}
@@ -203,48 +215,88 @@ def fetch_city_details_for_plan(city_name):
 
 def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
     """
-    智能酒店搜索 + 5张图片 + Booking链接
+    [关键修改] 调用 API 获取 **真实** 酒店数据
     """
-    all_hotels = []
-    prefixes = [f"{city_name} Grand", f"The {city_name} View", f"{city_name} Boutique", "City Center Inn", "Backpacker Hostel", "Luxury Palace", "Comfort Stay", "Urban Hub"]
-    
-    for name in prefixes:
-        base = 50
-        multiplier = random.uniform(1, 10) 
-        price = int(base * multiplier)
-        tags = ["WiFi"]
-        if price > 250: tags += ["Pool", "Spa", "Luxury"]
-        if price < 100: tags += ["Budget", "Value"]
-        score = round(random.uniform(7.5, 9.8), 1)
-        
-        # === 生成 5 张图片 ===
-        img_list = []
-        for i in range(5):
-            rand_id = random.randint(1, 10000)
-            img_keyword = "luxury,hotel" if price > 200 else "hostel,room" if price < 80 else "hotel,room"
-            img_list.append(f"https://loremflickr.com/400/300/{img_keyword}?random={rand_id}")
-        
-        # === 生成 Booking.com 链接 ===
-        booking_query = f"{name} {city_name}".replace(" ", "+")
-        booking_url = f"https://www.booking.com/searchresults.html?ss={booking_query}"
+    try:
+        loc_id = get_location_id(city_name)
+        if not loc_id: return []
 
-        all_hotels.append({
-            "name": name, 
-            "price": price, 
-            "score": score, 
-            "tags": tags, 
-            "images": img_list,
-            "booking_url": booking_url
-        })
-    
-    filtered_hotels = [h for h in all_hotels if h['price'] <= max_nightly_budget]
-    if not filtered_hotels: filtered_hotels = sorted(all_hotels, key=lambda x: x['price'])[:3]
-    
-    if style == "Staycation": filtered_hotels.sort(key=lambda x: x['price'], reverse=True)
-    elif style == "Budget": filtered_hotels.sort(key=lambda x: x['price'])
-    else: filtered_hotels.sort(key=lambda x: x['score'], reverse=True)
+        headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
+        url = f"https://{HOST_ATTRACTIONS}/hotels/list"
         
-    return filtered_hotels[:4]
+        # 这里的 limit 可以稍微多取一点，然后回来过滤价格
+        resp = requests.get(url, headers=headers, params={
+            "location_id": loc_id, 
+            "limit": "15", 
+            "currency": "USD",
+            "checkin": check_in_date,
+            "nights": "1"
+        }).json()
+        
+        real_hotels = []
+        
+        if "data" in resp:
+            for item in resp["data"]:
+                if "name" not in item: continue
+                
+                # 提取价格 (API 返回格式通常是 "$120 - $150"，我们需要解析)
+                price_str = item.get("price", "$200") 
+                try:
+                    # 简单清洗: 取第一个数字
+                    clean_price = ''.join([c for c in price_str if c.isdigit()])
+                    price = int(clean_price) if clean_price else 200
+                except:
+                    price = 200
+                
+                # [优化] 提取真实图片
+                main_img = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
+                if not main_img:
+                     main_img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
+                
+                # 图片列表
+                images = []
+                if main_img: images.append(main_img)
+                
+                # 补充图片 (为了图片不重复，使用名字作为随机种子)
+                safe_name = item['name'].replace(" ", "")
+                for i in range(5 - len(images)):
+                    seed = hash(safe_name) + i
+                    images.append(f"https://loremflickr.com/400/300/hotel,room?random={seed}")
+
+                # [关键修改] 生成 Booking 真实搜索链接
+                # 最好加上城市名，避免同名酒店
+                booking_query = urllib.parse.quote(f"{item['name']} {city_name}")
+                booking_url = f"https://www.booking.com/searchresults.html?ss={booking_query}"
+
+                # 标签
+                tags = []
+                if "ranking" in item: tags.append("Top Rated")
+                if price > 300: tags.append("Luxury")
+                elif price < 100: tags.append("Budget")
+                
+                real_hotels.append({
+                    "name": item['name'],
+                    "price": price,
+                    "score": item.get("rating", "8.0"),
+                    "tags": tags[:3], # 只取前3个
+                    "images": images,
+                    "booking_url": booking_url
+                })
+        
+        # 本地筛选逻辑
+        filtered = [h for h in real_hotels if h['price'] <= max_nightly_budget]
+        if not filtered: filtered = sorted(real_hotels, key=lambda x: x['price'])[:4]
+        
+        # 排序
+        if style == "Staycation": filtered.sort(key=lambda x: x['price'], reverse=True)
+        elif style == "Budget": filtered.sort(key=lambda x: x['price'])
+        else: filtered.sort(key=lambda x: str(x['score']), reverse=True)
+            
+        return filtered[:4]
+
+    except Exception as e:
+        print(f"Hotel API Error: {e}")
+        return []
 
 # --- Helper: 纯代码生成邮票样式 (复古风) ---
 def create_digital_stamp(image_file, title_text, location_text):
@@ -386,8 +438,8 @@ class TravelAgent:
            Since Markdown tables can be tricky, use HTML image tags with width to create a strip.
            Format:
            `<div style="display: flex; overflow-x: auto; gap: 5px;">
-              <img src="URL1" style="height: 120px; border-radius: 5px;">
-              <img src="URL2" style="height: 120px; border-radius: 5px;">
+              <img src="URL1" style="height: 120px; border-radius: 5px; object-fit: cover;">
+              <img src="URL2" style="height: 120px; border-radius: 5px; object-fit: cover;">
               ...
             </div>`
            (Use the URLs from the 'IMAGES' list in the data).
@@ -611,6 +663,7 @@ elif st.session_state.step == 5:
     city = st.session_state.selected_city
     data = st.session_state.trip_data
     
+    # 缓存酒店数据，避免重复调用 API
     if "current_hotel_list" not in st.session_state or st.session_state.current_hotel_list is None:
         hotel_budget_max = data['daily_budget'] * 0.5 
         st.session_state.current_hotel_list = search_hotels_smart(

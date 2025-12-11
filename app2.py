@@ -11,7 +11,7 @@ import base64
 import random
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from io import BytesIO
-import urllib.parse # 用于处理URL编码
+import urllib.parse 
 
 # === 引入 Geopy 用于地理编码 ===
 from geopy.geocoders import Nominatim
@@ -34,7 +34,6 @@ AZURE_API_VERSION = "2023-05-15"
 EMBEDDING_MODEL = "text-embedding-ada-002"
 CHAT_MODEL = "gpt-4o"
 HOST_ATTRACTIONS = "travel-advisor.p.rapidapi.com"
-# 酒店数据也统一使用 Travel Advisor API 获取，保证真实性
 HOST_HOTELS = "travel-advisor.p.rapidapi.com" 
 HOST_WEATHER = "weather-api99.p.rapidapi.com"
 
@@ -111,6 +110,13 @@ st.markdown(f"""
     .hotel-card:hover {{
         box-shadow: 0 8px 16px rgba(0,0,0,0.1);
     }}
+    
+    /* 新增：酒店主图样式 */
+    .hotel-main-img {{
+        border-radius: 12px;
+        height: 250px;
+        object-fit: cover;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,11 +140,10 @@ def get_coordinates(location_name):
     return 22.3193, 114.1694
 
 # ============================
-# 3. API Tools (Fixed & Enhanced)
+# 3. API Tools
 # ============================
 
 def get_location_id(city_name):
-    """单独提取获取 Location ID 的逻辑，供多处复用"""
     try:
         headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
         url = f"https://{HOST_ATTRACTIONS}/locations/search"
@@ -151,7 +156,7 @@ def get_location_id(city_name):
 
 def fetch_city_details_for_plan(city_name):
     """
-    获取真实的景点和餐厅数据，并尽量获取真实大图
+    获取真实景点/餐厅数据，只提取真实图片 URL
     """
     try:
         loc_id = get_location_id(city_name)
@@ -159,51 +164,43 @@ def fetch_city_details_for_plan(city_name):
         
         headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
         
-        # 获取景点 & 餐厅
         url_a = f"https://{HOST_ATTRACTIONS}/attractions/list"
-        resp_a = requests.get(url_a, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
+        resp_a = requests.get(url_a, headers=headers, params={"location_id": loc_id, "limit": "6", "currency": "USD"}).json()
         
         url_r = f"https://{HOST_ATTRACTIONS}/restaurants/list"
-        resp_r = requests.get(url_r, headers=headers, params={"location_id": loc_id, "limit": "4", "currency": "USD"}).json()
+        resp_r = requests.get(url_r, headers=headers, params={"location_id": loc_id, "limit": "6", "currency": "USD"}).json()
         
         items = []
         
         def process_items(data_list, type_label):
             if "data" in data_list:
-                for item in data_list["data"]:
+                for i_item, item in enumerate(data_list["data"]):
                     if "name" in item:
-                        address = item.get('address', 'Address not available')
+                        name = item['name']
+                        address = item.get('address', 'Address unavailable')
+                        rating = item.get('rating', 'N/A')
+                        num_reviews = item.get('num_reviews', '0')
+                        price_level = item.get('price_level', 'N/A')
+                        open_now_text = item.get('open_now_text', 'Hours not listed')
                         
-                        # [优化] 尝试获取真实的高清大图
-                        main_img = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
-                        if not main_img:
-                             # 如果没有 original，尝试 large
-                             main_img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
+                        # [关键修改] 只提取真实的图片 URL，不凑假图
+                        real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
+                        if not real_image_url:
+                             real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "N/A")
                         
-                        # 构建图片列表：第1张必定是真图（如果有），剩下4张用LoremFlickr补充氛围图
-                        images = []
-                        if main_img: images.append(main_img)
-                        
-                        # 补充图片 (为了避免重复，使用 name hash 作为种子)
-                        safe_name = item['name'].replace(" ", "")
-                        base_keyword = "landmark" if type_label == "ATTRACTION" else "food"
-                        
-                        for i in range(5 - len(images)):
-                            # 使用 item name 的 hash 加上 index 作为随机种子，保证每次生成都一样，但不同项目不一样
-                            seed = hash(safe_name) + i
-                            images.append(f"https://loremflickr.com/400/300/{base_keyword}?random={seed}")
-                        
-                        # 构建 Google Maps Link
-                        map_query = urllib.parse.quote(f"{item['name']} {city_name}")
+                        map_query = urllib.parse.quote(f"{name} {city_name}")
                         map_link = f"https://www.google.com/maps/search/?api=1&query={map_query}"
                         
+                        # 传递给 LLM 的数据块，包含单一的真实图片 URL
                         items.append(f"""
                         TYPE: {type_label}
-                        NAME: {item['name']}
+                        NAME: {name}
                         ADDRESS: {address}
+                        RATING: {rating} ({num_reviews} reviews)
+                        PRICE_LEVEL: {price_level}
+                        OPENING_HOURS: {open_now_text}
                         MAP_LINK: {map_link}
-                        RATING: {item.get('rating', 'N/A')}
-                        IMAGES: {json.dumps(images)} 
+                        IMAGE_URL: {real_image_url} 
                         """)
 
         process_items(resp_a, "ATTRACTION")
@@ -215,7 +212,7 @@ def fetch_city_details_for_plan(city_name):
 
 def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
     """
-    [关键修改] 调用 API 获取 **真实** 酒店数据
+    获取真实酒店，只提取真实图片 URL
     """
     try:
         loc_id = get_location_id(city_name)
@@ -224,10 +221,9 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
         url = f"https://{HOST_ATTRACTIONS}/hotels/list"
         
-        # 这里的 limit 可以稍微多取一点，然后回来过滤价格
         resp = requests.get(url, headers=headers, params={
             "location_id": loc_id, 
-            "limit": "15", 
+            "limit": "30", 
             "currency": "USD",
             "checkin": check_in_date,
             "nights": "1"
@@ -236,61 +232,52 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
         real_hotels = []
         
         if "data" in resp:
-            for item in resp["data"]:
+            for i_item, item in enumerate(resp["data"]):
                 if "name" not in item: continue
                 
-                # 提取价格 (API 返回格式通常是 "$120 - $150"，我们需要解析)
-                price_str = item.get("price", "$200") 
+                price_str = item.get("price", "$999") 
                 try:
-                    # 简单清洗: 取第一个数字
                     clean_price = ''.join([c for c in price_str if c.isdigit()])
-                    price = int(clean_price) if clean_price else 200
-                except:
-                    price = 200
+                    price = int(clean_price) if clean_price else 999
+                except: price = 999
                 
-                # [优化] 提取真实图片
-                main_img = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
-                if not main_img:
-                     main_img = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
+                # [关键修改] 只提取真实的图片 URL
+                real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
+                if not real_image_url:
+                     real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
                 
-                # 图片列表
-                images = []
-                if main_img: images.append(main_img)
+                # 如果连一张真图都没有，为了 UI 美观，可以使用一个固定的“暂无图片”占位符，或者直接留空
+                # 这里选择留空，UI 层会处理
                 
-                # 补充图片 (为了图片不重复，使用名字作为随机种子)
-                safe_name = item['name'].replace(" ", "")
-                for i in range(5 - len(images)):
-                    seed = hash(safe_name) + i
-                    images.append(f"https://loremflickr.com/400/300/hotel,room?random={seed}")
-
-                # [关键修改] 生成 Booking 真实搜索链接
-                # 最好加上城市名，避免同名酒店
                 booking_query = urllib.parse.quote(f"{item['name']} {city_name}")
                 booking_url = f"https://www.booking.com/searchresults.html?ss={booking_query}"
 
-                # 标签
                 tags = []
-                if "ranking" in item: tags.append("Top Rated")
-                if price > 300: tags.append("Luxury")
-                elif price < 100: tags.append("Budget")
+                rating = item.get("rating", "N/A")
+                if rating != "N/A" and float(rating) >= 4.5: tags.append("Top Rated")
+                if price > 400: tags.append("Luxury")
+                elif price < 150: tags.append("Value")
                 
                 real_hotels.append({
                     "name": item['name'],
                     "price": price,
-                    "score": item.get("rating", "8.0"),
-                    "tags": tags[:3], # 只取前3个
-                    "images": images,
+                    "score": rating,
+                    "tags": tags[:3],
+                    "image": real_image_url, # 现在是单个URL字符串
                     "booking_url": booking_url
                 })
         
-        # 本地筛选逻辑
         filtered = [h for h in real_hotels if h['price'] <= max_nightly_budget]
-        if not filtered: filtered = sorted(real_hotels, key=lambda x: x['price'])[:4]
+        
+        # 强制兜底
+        if not filtered and real_hotels:
+            filtered = sorted(real_hotels, key=lambda x: x['price'])[:4]
         
         # 排序
         if style == "Staycation": filtered.sort(key=lambda x: x['price'], reverse=True)
         elif style == "Budget": filtered.sort(key=lambda x: x['price'])
-        else: filtered.sort(key=lambda x: str(x['score']), reverse=True)
+        else: 
+            filtered.sort(key=lambda x: float(x['score']) if x['score'].replace('.', '', 1).isdigit() else 0, reverse=True)
             
         return filtered[:4]
 
@@ -300,9 +287,6 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
 
 # --- Helper: 纯代码生成邮票样式 (复古风) ---
 def create_digital_stamp(image_file, title_text, location_text):
-    """
-    接收上传的图片文件，返回一张处理好的邮票图片对象 (复古风)
-    """
     try:
         img = Image.open(image_file).convert("RGBA")
     except:
@@ -311,7 +295,6 @@ def create_digital_stamp(image_file, title_text, location_text):
     target_w, target_h = 600, 800
     img = ImageOps.fit(img, (target_w, target_h), centering=(0.5, 0.5))
     
-    # 背景色改为米白色
     paper_color = (250, 249, 245, 255) 
     border_width = 50 
     stamp_w = target_w + border_width * 2
@@ -320,7 +303,6 @@ def create_digital_stamp(image_file, title_text, location_text):
     stamp = Image.new("RGBA", (stamp_w, stamp_h), paper_color)
     stamp.paste(img, (border_width, border_width))
     
-    # 极细灰色内描边
     draw = ImageDraw.Draw(stamp)
     draw.rectangle(
         [border_width-1, border_width-1, border_width+target_w, border_width+target_h], 
@@ -426,26 +408,17 @@ class TravelAgent:
         Create a detailed {criteria['days']}-day itinerary for {city}.
         Concept: {plan_concept}
         
-        Raw Data Provided (Contains Names, Addresses, Map Links, and Image Lists):
+        Raw Data Provided (Contains Names, Addresses, Map Links, and IMAGE_URL, RATING, PRICE, HOURS):
         {real_data}
         
         CRITICAL FORMATTING RULES:
-        1. **LOCATIONS**: For every attraction/restaurant, display the Name and Address as a link.
-           Format: `📍 [Name](Map_Link) - Address` 
-           (Use the exact MAP_LINK provided in the data).
+        1. **LOCATIONS**: For every attraction/restaurant, display:
+           - The Name and Address as a link: `📍 [Name](Map_Link)`
+           - The Single Real Image: `![Name](IMAGE_URL)` (If IMAGE_URL is 'N/A', do not show image).
+           - Details Line: `🏠 Address: ... | ⭐ Rating: ... | 💰 Price Level: ... | 🕒 Hours: ...`
+           (Use the exact fields provided. If fields are 'N/A' or missing, Estimate them based on the location type, e.g., "Estimated Price: $$").
            
-        2. **IMAGES (Gallery)**: For key locations, display 5 images in a row. 
-           Since Markdown tables can be tricky, use HTML image tags with width to create a strip.
-           Format:
-           `<div style="display: flex; overflow-x: auto; gap: 5px;">
-              <img src="URL1" style="height: 120px; border-radius: 5px; object-fit: cover;">
-              <img src="URL2" style="height: 120px; border-radius: 5px; object-fit: cover;">
-              ...
-            </div>`
-           (Use the URLs from the 'IMAGES' list in the data).
-           
-        3. **PRICING & HOURS**: Include specific numbers.
-        4. **Tone**: Engaging and clear.
+        2. **TONE**: Engaging and clear.
         """
         
         resp = self.client.chat.completions.create(model=CHAT_MODEL, messages=[{"role": "user", "content": prompt}])
@@ -588,7 +561,8 @@ elif st.session_state.step == 2:
         st.markdown("#### Travel Style")
         style = st.radio("Focus:", ["Citywalk", "Shopping", "Foodie", "Staycation", "Culture"], horizontal=True)
         
-        budget_map = {"Budget": 150, "Standard": 350, "Luxury": 800}
+        # [修改] 提高预算标准，适应真实物价
+        budget_map = {"Budget": 200, "Standard": 500, "Luxury": 1000}
         
         if st.button("Find Matching Cities ✨"):
             if feelings:
@@ -663,9 +637,9 @@ elif st.session_state.step == 5:
     city = st.session_state.selected_city
     data = st.session_state.trip_data
     
-    # 缓存酒店数据，避免重复调用 API
     if "current_hotel_list" not in st.session_state or st.session_state.current_hotel_list is None:
-        hotel_budget_max = data['daily_budget'] * 0.5 
+        # [修改] 提高酒店预算比例至 70%，避免错过好酒店
+        hotel_budget_max = data['daily_budget'] * 0.7 
         st.session_state.current_hotel_list = search_hotels_smart(
             city, datetime.now().strftime("%Y-%m-%d"), data['style'], hotel_budget_max
         )
@@ -709,7 +683,7 @@ elif st.session_state.step == 5:
         
         hotels = st.session_state.current_hotel_list
         
-        if not hotels: st.warning("Budget too low for hotels.")
+        if not hotels: st.warning("No hotels found matching criteria. Try increasing budget.")
         
         for h in hotels:
             with st.container():
@@ -719,11 +693,11 @@ elif st.session_state.step == 5:
                 st.markdown(f"#### 🏨 [{h['name']}]({h['booking_url']})")
                 st.caption("Click name to book on Booking.com ↗")
                 
-                # 2. 图片浏览 (使用 Tabs 模拟滑动效果)
-                tabs = st.tabs(["📸 1", "📸 2", "📸 3", "📸 4", "📸 5"])
-                for i, tab in enumerate(tabs):
-                    with tab:
-                        st.image(h['images'][i], use_container_width=True)
+                # 2. 图片浏览 (修改为只显示一张大图)
+                if h['image']:
+                    st.image(h['image'], use_container_width=True, className="hotel-main-img")
+                else:
+                    st.caption("No image available")
                 
                 # 3. 信息展示
                 st.markdown(f"""

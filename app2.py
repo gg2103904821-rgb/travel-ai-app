@@ -12,8 +12,6 @@ import random
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 from io import BytesIO
 import urllib.parse 
-
-# === 引入 Geopy 用于地理编码 ===
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
@@ -127,7 +125,6 @@ def estimate_flight_cost(origin, destination):
         return 350
     return 900 
 
-# --- Helper: 地址转坐标 ---
 def get_coordinates(location_name):
     try:
         geolocator = Nominatim(user_agent="wanderlust_ai_app")
@@ -156,7 +153,7 @@ def get_location_id(city_name):
 
 def fetch_city_details_for_plan(city_name):
     """
-    获取真实景点/餐厅数据，只提取真实图片 URL
+    Obtain authentic attraction/restaurant data, extracting only genuine image URLs
     """
     try:
         loc_id = get_location_id(city_name)
@@ -182,8 +179,7 @@ def fetch_city_details_for_plan(city_name):
                         num_reviews = item.get('num_reviews', '0')
                         price_level = item.get('price_level', 'N/A')
                         open_now_text = item.get('open_now_text', 'Hours not listed')
-                        
-                        # 只提取真实的图片 URL
+
                         real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
                         if not real_image_url:
                              real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "N/A")
@@ -211,18 +207,16 @@ def fetch_city_details_for_plan(city_name):
 
 def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
     """
-    获取真实酒店 + 强制兜底逻辑 (确保永远有结果)
+    Acquire Authentic Hotels + Mandatory Safety Net Logic (Ensuring Results Every Time)
     """
     real_hotels = []
     
-    # 1. 尝试从 API 获取真实数据
     try:
         loc_id = get_location_id(city_name)
         if loc_id:
             headers = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": HOST_ATTRACTIONS}
             url = f"https://{HOST_ATTRACTIONS}/hotels/list"
-            
-            # 通用查询
+
             resp = requests.get(url, headers=headers, params={
                 "location_id": loc_id, 
                 "limit": "30", 
@@ -239,8 +233,7 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
                         clean_price = ''.join([c for c in price_str if c.isdigit()])
                         price = int(clean_price) if clean_price else 200
                     except: price = 200
-                    
-                    # 只提取真实图片
+
                     real_image_url = item.get('photo', {}).get('images', {}).get('original', {}).get('url', "")
                     if not real_image_url:
                          real_image_url = item.get('photo', {}).get('images', {}).get('large', {}).get('url', "")
@@ -265,14 +258,14 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
     except Exception as e:
         print(f"Hotel API Error: {e}")
 
-    # 2. 筛选逻辑
+    # Screening Logic
     filtered = [h for h in real_hotels if h['price'] <= max_nightly_budget]
     
-    # 3. [第一层兜底] 如果筛选后没结果，返回真实数据中最便宜的
+    # If no results are found after filtering, return the cheapest item from the actual data.
     if not filtered and real_hotels:
         filtered = sorted(real_hotels, key=lambda x: x['price'])[:4]
         
-    # 4. [终极兜底] 如果连 API 都没返回数据，生成模拟数据 (仅作为最后保险，通常不会触发)
+    # If the API fails to return any data, generate simulated data (only as a last resort; typically not triggered)
     if not filtered:
         fallback_names = [f"{city_name} Grand Hotel", f"The {city_name} View", f"{city_name} City Center", "Royal Stay"]
         for i, name in enumerate(fallback_names):
@@ -289,7 +282,7 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
                 "booking_url": f"https://www.booking.com/searchresults.html?ss={booking_query}"
             })
 
-    # 排序
+    # ranking
     if style == "Staycation": filtered.sort(key=lambda x: x['price'], reverse=True)
     elif style == "Budget": filtered.sort(key=lambda x: x['price'])
     else: 
@@ -297,7 +290,7 @@ def search_hotels_smart(city_name, check_in_date, style, max_nightly_budget):
             
     return filtered[:4]
 
-# --- Helper: 纯代码生成邮票样式 (复古风) ---
+# --- Helper: Pure Code-Generated Stamp Style (Retro) ---
 def create_digital_stamp(image_file, title_text, location_text):
     try:
         img = Image.open(image_file).convert("RGBA")
@@ -487,21 +480,21 @@ with st.sidebar:
     
     if uploaded_file and st.button("✨ Mint Stamp"):
         with st.spinner("Analyzing & Minting..."):
-            # 1. AI 分析
+            # AI analysis
             bytes_data = uploaded_file.getvalue()
             ai_meta = st.session_state.agent.analyze_image_for_stamp(bytes_data)
             
-            # 2. 生成邮票图片
+            # Generate stamp images
             stamp_img = create_digital_stamp(
                 uploaded_file, 
                 ai_meta['title'], 
                 user_location
             )
             
-            # 3. 获取经纬度
+            # Retrieve latitude and longitude
             lat, lon = get_coordinates(user_location)
             
-            # 4. 存入集邮册
+            # Place in the stamp album
             new_stamp_record = {
                 "image": stamp_img,
                 "title": ai_meta['title'],
@@ -515,7 +508,7 @@ with st.sidebar:
             
             st.success("Stamp added to your Journey Map!")
 
-    # 预览最新一张 + 下载按钮
+    # Preview the latest image + Download button
     if st.session_state.stamp_collection:
         latest = st.session_state.stamp_collection[-1]
         st.image(latest['image'], caption=f"Latest: {latest['title']}", use_container_width=True)
@@ -566,7 +559,6 @@ elif st.session_state.step == 2:
         feelings = col2.text_input("Vibe / Feeling", placeholder="e.g. Quiet like 'Lost in Translation'")
         
         c1, c2, c3 = st.columns(3)
-        # [修改点] 将 select_slider 改为 number_input，让用户自由输入预算
         daily_budget = c1.number_input("Daily Budget (USD/Person)", min_value=50, max_value=5000, value=250, step=50)
         
         days = c2.slider("Duration (Days)", 2, 10, 4)
@@ -649,7 +641,6 @@ elif st.session_state.step == 5:
     data = st.session_state.trip_data
     
     if "current_hotel_list" not in st.session_state or st.session_state.current_hotel_list is None:
-        # [修改] 提高酒店预算比例至 70% + 兜底逻辑确保不为空
         hotel_budget_max = data['daily_budget'] * 0.7 
         st.session_state.current_hotel_list = search_hotels_smart(
             city, datetime.now().strftime("%Y-%m-%d"), data['style'], hotel_budget_max
@@ -693,28 +684,23 @@ elif st.session_state.step == 5:
         st.markdown("### 🏨 Recommended Hotels")
         
         hotels = st.session_state.current_hotel_list
-        
-        # [修改] 由于有兜底逻辑，这里基本不会触发，但保留作为双重保险
+
         if not hotels: st.warning("We couldn't find hotels via API. Please check your network.")
         
         for h in hotels:
             with st.container():
                 st.markdown('<div class="hotel-card">', unsafe_allow_html=True)
                 
-                # 1. 酒店标题 + Booking 跳转链接
                 st.markdown(f"#### 🏨 [{h['name']}]({h['booking_url']})")
                 st.caption("Click name to book on Booking.com ↗")
-                
-                # 2. 图片浏览 (修复了之前的报错)
+
                 if h['image']:
-                    # 使用 HTML 渲染图片，以保证 object-fit: cover (裁切不变形) 和圆角
                     st.markdown(f"""
                     <img src="{h['image']}" style="width:100%; height:200px; object-fit:cover; border-radius:12px; margin-bottom:10px;">
                     """, unsafe_allow_html=True)
                 else:
                     st.caption("No image available")
                 
-                # 3. 信息展示
                 st.markdown(f"""
                 <div class="hotel-info">
                     <p>⭐ <b>{h['score']}</b> • <b style="color:#e67e22; font-size:1.1em;">${h['price']}</b>/night</p>
@@ -753,7 +739,7 @@ elif st.session_state.step == 5:
             </div>
             """, unsafe_allow_html=True)
 
-    # 底部按钮区
+
     st.divider()
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
@@ -767,7 +753,7 @@ elif st.session_state.step == 5:
             st.session_state.step = 6
             st.rerun()
             
-# --- STEP 6: JOURNEY MAP (圆周旅迹) ---
+# --- STEP 6: JOURNEY MAP ---
 elif st.session_state.step == 6:
     st.markdown("## 🌍 My Journey Map & Album")
     st.markdown("Your digital footprint, immortalized as stamps.")
@@ -781,14 +767,14 @@ elif st.session_state.step == 6:
             st.info("No stamps yet! Upload photos in the Sidebar to start tracking your journey.")
             m = folium.Map(location=[22.3193, 114.1694], zoom_start=11)
         else:
-            # 1. 初始化地图，中心点设为第一张邮票的位置
+            # Initialize the map, setting the center point to the location of the first stamp.
             start_loc = [st.session_state.stamp_collection[0]['lat'], st.session_state.stamp_collection[0]['lon']]
             m = folium.Map(location=start_loc, zoom_start=13)
             
-            # 2. 准备轨迹坐标点列表
+            # Prepare a list of trajectory coordinate points
             route_coords = []
             
-            # 3. 遍历集邮册打点
+            # Traverse the stamp album to mark the points
             for idx, stamp in enumerate(st.session_state.stamp_collection):
                 coord = [stamp['lat'], stamp['lon']]
                 route_coords.append(coord)
@@ -806,7 +792,7 @@ elif st.session_state.step == 6:
                     icon=folium.Icon(color="purple", icon="camera", prefix="fa")
                 ).add_to(m)
             
-            # 4. 绘制轨迹线
+            # Plot trajectory lines
             if len(route_coords) > 1:
                 folium.PolyLine(
                     route_coords,

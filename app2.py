@@ -571,7 +571,7 @@ elif st.session_state.step == 2:
             if feelings:
                 st.session_state.trip_data = {
                     "origin": origin, "feelings": feelings, 
-                    "daily_budget": daily_budget, # 直接使用用户输入的值
+                    "daily_budget": daily_budget, 
                     "days": days, "pax": pax, "style": style
                 }
                 with st.spinner("Analyzing world map..."):
